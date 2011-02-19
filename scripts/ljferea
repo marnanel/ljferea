@@ -1,0 +1,203 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Getopt::Long;
+use File::HomeDir;
+use File::Path qw(make_path);
+use File::Slurp;
+use LJ::Simple;
+use JSON;
+
+# FIXME: Possibly we should separate config and cache
+# FIXME: Support for friends groups
+
+my $opt_run = 0;
+my $opt_list = 0;
+my $opt_add = undef;
+my $opt_del = undef;
+
+my $options = GetOptions (
+		'r|run!' => \$opt_run, 
+		'a|add=s' => \$opt_add,
+		'd|delete=s'  => \$opt_del,
+		'l|list' => \$opt_list,
+	);
+
+my $config;
+my $config_file;
+
+sub load_config {
+	$config_file = $ENV{'XDG_CONFIG_HOME'};
+	$config_file = File::HomeDir->my_home . '/.config' unless defined $config_file;
+	$config_file .= '/ljferea';
+	make_path($config_file) unless -e $config_file;
+	$config_file .= '/ljferea.json';
+	if (-e $config_file) {
+		$config = from_json(read_file($config_file));
+	} else {
+		$config = {};
+	}
+}
+
+sub save_config {
+	die "need a filename" unless defined $config_file;
+	my $temp_file = "$config_file.1";
+	write_file ($temp_file, to_json($config));
+	rename($temp_file, $config_file) or die "Couldn't rename $temp_file";
+}
+
+sub do_list {
+	if (scalar(%$config)) {
+		for (sort keys %$config) {
+			print "$_\n";
+		}
+	} else {
+		print "No sites to list. Add one with the -a option.\n";
+	}
+}
+
+# Asks the server whether we should get our friends list
+# (as opposed to using the cache). If we've already asked
+# recently, the answer will automatically be false without
+# polling the server. (This is required by the API.)
+# XXX Possibly delete this; we don't stick around for
+# XXX long enough to use it
+sub check_friends {
+	my ($site, $lj) = @_;
+
+	unless ($config->{$site}) {
+		print "Sorry, I don't know about $site.\n";
+		return;
+	}
+
+	my $cfnext = 0;
+	$cfnext = $config->{$site}->{'cfnext'} if defined $config->{site}->{'cfnext'};
+
+	print "cfnext is $cfnext\n";
+
+	print "too early\n" if $cfnext > time;
+	return 0 if $cfnext > time;
+
+	my @cf = $lj->CheckFriends();
+
+	print "undef" unless @cf;
+	return 0 unless @cf;
+
+	$config->{$site}->{'cfnext'} = time + $cf[1];
+	save_config();
+
+	return $cf[0];
+}
+
+sub do_run {
+	unless (scalar(%$config)) {
+		print "No sites are configured. Add one with the -a option.\n";
+		return;
+	}
+
+	my %posts;
+
+	for my $site (sort keys %$config) {
+		my $synctime = $config->{$site}->{'synctime'};
+		$synctime = 0 unless defined $synctime;
+
+		print "Checking $site\n";
+		use Data::Dumper;
+			my $lj = new LJ::Simple ({
+				user => $config->{$site}->{'username'},
+				pass => $config->{$site}->{'password'},
+				site => $site,
+				});
+		die "Sorry, couldn't log in to $site: $LJ::Simple::error\n" unless $lj;
+
+		$lj->GetEntries(\%posts, 'riordon', 'sync', $synctime, 'beforedate', $synctime);
+		print "Sorry, $LJ::Simple::error\n";
+
+	}
+	use Data::Dumper;
+	print Dumper(\%posts);
+}
+
+sub do_add {
+	my ($site) = @_;
+
+	if ($config->{$site}) {
+		print "Sorry, I already know about $site. You can delete it with the -d option.\n";
+		return;
+	}
+
+	print "Adding a site for $site. Please make sure that this is\n";
+	print "a real hostname. 'www.livejournal.com' would be a good choice;\n";
+	print "so would 'www.dreamwidth.org'.\n";
+	print "\n";
+	print "Please give your username on $site:\n";
+	my $username = <STDIN>;
+	chomp $username;
+# FIXME: How hard would it be not to echo it?
+	print "Please give your password on $site:\n";
+	my $password = <STDIN>;
+	chomp $password;
+
+	print "\n";
+	print "Lovely. Attempting to log you in.\n";
+
+	my $lj = new LJ::Simple ({
+			user    =>      $username,
+			pass    =>      $password,
+			site    =>      $site,
+			});
+
+	if (defined $lj) {
+
+		$config->{$site} = {
+			username => $username,
+			password => $password,
+		};
+
+		save_config();
+
+		print "Success! You should be able to view your friends page now.\n";
+
+	} else {
+		print "That didn't work. The site said:\n";
+		print $LJ::Simple::error, "\n";
+		print "Please try again.\n";
+	}
+}
+
+sub do_del {
+	my ($site) = @_;
+
+	unless ($config->{$site}) {
+		print "Sorry, I don't know about $site.\n";
+		return;
+	}
+
+	undef $config->{$site};
+	save_config();
+	print "I have forgotten all about $site.\n";
+}
+
+load_config();
+
+# FIXME: Here we should check whether our parent is liferea, and
+# set run=1 if so.
+
+# FIXME: Die if our parent is apache.
+
+if (!$opt_run && !$opt_add && !$opt_del && !$opt_list) {
+	print "ljferea - read your friends page on LiveJournal, Dreamwidth, etc., in a local feed reader\n";
+	print "\n";
+	print "Options:\n";
+	print "  -a SITENAME    add SITENAME to the database\n";
+	print "  -d SITENAME    remove SITENAME from the database\n";
+	print "  -r             actually produce the feed (to stdout)\n";
+
+	exit(1);
+}
+
+do_run() if $opt_run;
+do_list() if $opt_list;
+do_add($opt_add) if $opt_add;
+do_del($opt_del) if $opt_del;
+
