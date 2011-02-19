@@ -110,8 +110,14 @@ sub do_run {
 				});
 		die "Sorry, couldn't log in to $site: $LJ::Simple::error\n" unless $lj;
 
-		$lj->GetEntries(\%posts, 'riordon', 'sync', $synctime, 'beforedate', $synctime);
-		print "Sorry, $LJ::Simple::error\n";
+		my @friends = $lj->GetFriends();
+		print Dumper(222, \@friends);
+		$lj->GetEntries(\%posts, 'firinel', 'sync', $synctime);
+
+		if ($LJ::Simple::error) {
+			print "Sorry, can't get entries from $site - $LJ::Simple::error\n";
+			next;
+		}
 
 	}
 	use Data::Dumper;
