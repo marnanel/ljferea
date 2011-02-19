@@ -9,18 +9,19 @@ use LJ::Simple;
 use JSON;
 
 # FIXME: Possibly we should separate config and cache
-# FIXME: Support for friends groups
 
-my $opt_run = 0;
+my $opt_run = undef;
 my $opt_list = 0;
 my $opt_add = undef;
 my $opt_del = undef;
+my $opt_group = undef;
 
 my $options = GetOptions (
-		'r|run!' => \$opt_run, 
+		'r|run=s' => \$opt_run, 
 		'a|add=s' => \$opt_add,
 		'd|delete=s'  => \$opt_del,
 		'l|list' => \$opt_list,
+		'g|group=s', => \$opt_group,
 	);
 
 my $config;
@@ -30,13 +31,30 @@ sub load_config {
 	$config_file = $ENV{'XDG_CONFIG_HOME'};
 	$config_file = File::HomeDir->my_home . '/.config' unless defined $config_file;
 	$config_file .= '/ljferea';
-	make_path($config_file) unless -e $config_file;
+	make_path($config_file) unless -d $config_file;
 	$config_file .= '/ljferea.json';
 	if (-e $config_file) {
 		$config = from_json(read_file($config_file));
 	} else {
 		$config = {};
 	}
+}
+
+# Returns a directory for caching posts from the given site.
+# Creates it if necessary.
+sub cache_dir {
+	my ($site) = @_;
+
+	$site = lc $site;
+	die "Site $site contains invalid characters!" unless $site =~ /^[a-z][a-z\.-]*$/;
+	my $cache_file = $ENV{'XDG_CACHE_HOME'};
+	$cache_file = File::HomeDir->my_home . '/.cache' unless defined $cache_file;
+
+	$cache_file .= "/ljferea/$site/";
+
+	make_path($cache_file) unless -d $cache_file;
+
+	return $cache_file;
 }
 
 sub save_config {
@@ -89,39 +107,96 @@ sub check_friends {
 	return $cf[0];
 }
 
+sub get_friends {
+	my ($lj, $group) = @_;
+
+	my @result;
+
+	my @friends = $lj->GetFriends();
+	shift @friends; # it unaccountably adds a length at the start
+
+	for my $user (@friends) {
+		my $name = $user->{'user'};
+
+		push @result, $name if
+			!defined $group ||
+			grep { $_ eq $group } @{$user->{'groups'}};
+	}
+
+	return @result;
+}
+
+sub cache_entries {
+	my ($site) = @_;
+
+	my @posts;
+
+	print "Checking $site\n";
+
+	my $lj = new LJ::Simple ({
+			user => $config->{$site}->{'username'},
+			pass => $config->{$site}->{'password'},
+			site => $site,
+			});
+	die "Sorry, couldn't log in to $site: $LJ::Simple::error\n" unless $lj;
+
+	my $cache_file = cache_dir($site);
+
+	my @friends = get_friends($lj, $opt_group);
+
+	for my $friend (@friends) {
+		print "Getting entries for $friend\n";
+
+		my $start_time = time;
+		my $friend_cache_file = "$cache_file/$friend.json";
+		my $friend_cache = {};
+		$friend_cache = from_json(read_file($friend_cache_file))
+			if -r $friend_cache_file;
+		my $synctime = $friend_cache->{'start_time'};
+		$synctime = 0 unless defined $synctime;
+
+		my @since;
+
+		if ($synctime) {
+			@since = ('sync', $synctime);
+		} else {
+			@since = ('lastn', 50, time);
+		}
+
+		my %temp;
+		$lj->GetEntries(\%temp, $friend, @since);
+		@posts = (@posts, values %temp);
+
+		if ($LJ::Simple::error) {
+			die "Sorry, can't get entries from $site for $friend - $LJ::Simple::error\n";
+		}
+
+		write_file ($friend_cache_file,
+			to_json( { start_time => $start_time } ));
+	}
+
+	for my $post (@posts) {
+		my $friend = $post->{'usejournal'};
+		next unless $friend;
+		next if $friend =~ /[\/\\\.-]/;
+
+		my $itemid = $post->{'__itemid'};
+		next unless $itemid;
+
+		write_file ("$cache_file/$friend-$itemid.json",
+			to_json($post));
+	}
+}
+
 sub do_run {
-	unless (scalar(%$config)) {
-		print "No sites are configured. Add one with the -a option.\n";
+	my ($site) = @_;
+
+	unless ($config->{$site}) {
+		print "Sorry, I don't know about $site.\n";
 		return;
 	}
 
-	my %posts;
-
-	for my $site (sort keys %$config) {
-		my $synctime = $config->{$site}->{'synctime'};
-		$synctime = 0 unless defined $synctime;
-
-		print "Checking $site\n";
-		use Data::Dumper;
-			my $lj = new LJ::Simple ({
-				user => $config->{$site}->{'username'},
-				pass => $config->{$site}->{'password'},
-				site => $site,
-				});
-		die "Sorry, couldn't log in to $site: $LJ::Simple::error\n" unless $lj;
-
-		my @friends = $lj->GetFriends();
-		print Dumper(222, \@friends);
-		$lj->GetEntries(\%posts, 'firinel', 'sync', $synctime);
-
-		if ($LJ::Simple::error) {
-			print "Sorry, can't get entries from $site - $LJ::Simple::error\n";
-			next;
-		}
-
-	}
-	use Data::Dumper;
-	print Dumper(\%posts);
+	cache_entries($site);
 }
 
 sub do_add {
@@ -197,12 +272,13 @@ if (!$opt_run && !$opt_add && !$opt_del && !$opt_list) {
 	print "Options:\n";
 	print "  -a SITENAME    add SITENAME to the database\n";
 	print "  -d SITENAME    remove SITENAME from the database\n";
-	print "  -r             actually produce the feed (to stdout)\n";
+	print "  -r SITENAME    actually produce the feed (to stdout)\n";
+	print "  -g GROUP       restrict to the named friends group\n";
 
 	exit(1);
 }
 
-do_run() if $opt_run;
+do_run($opt_run) if $opt_run;
 do_list() if $opt_list;
 do_add($opt_add) if $opt_add;
 do_del($opt_del) if $opt_del;
