@@ -188,6 +188,29 @@ sub cache_entries {
 	}
 }
 
+# Returns the contents of all entries in the cache,
+# sorted into date order.
+sub list_cache {
+	my ($site) = @_;
+
+	my @result;
+
+	my $cache_file = cache_dir ($site);
+
+	for my $file (glob("$cache_file*-*.json")) {
+		my $contents = from_json(read_file($file));
+
+		next unless $contents;
+		next unless defined $contents->{'__timet'};
+
+		$contents->{'__filename'} = $file;
+
+		push @result, $contents;
+	}
+
+	return sort { $b->{'__timet'} <=> $a->{'__timet'} } @result;
+}
+
 sub do_run {
 	my ($site) = @_;
 
@@ -196,7 +219,9 @@ sub do_run {
 		return;
 	}
 
-	cache_entries($site);
+	#cache_entries($site);
+	use Data::Dumper;
+	print Dumper(list_cache($site));
 }
 
 sub do_add {
